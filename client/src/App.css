@@ -563,6 +563,315 @@
 .btn-outline { background: transparent; border: 1px solid var(--border-light); color: var(--text-primary); }
 .btn-outline:hover { background: var(--border); }
 
+/* ── Mode Selector ────────────────────────────────────────── */
+.mode-selector {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+.mode-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition);
+}
+
+.mode-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-light);
+}
+
+.mode-btn.active {
+  background: var(--bg-card-hover);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.mode-icon {
+  font-size: 2rem;
+}
+
+.mode-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.mode-label {
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--text-primary);
+}
+
+.mode-sub {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* ── Configuration (FPS/Colors) ───────────────────────────── */
+.fps-options {
+  display: flex;
+  gap: 1rem;
+}
+
+.fps-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.fps-btn:hover {
+  border-color: var(--border-focus);
+}
+
+.fps-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+
+.fps-label {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.fps-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform var(--transition-fast);
+}
+
+.color-swatch.active {
+  border-color: var(--accent);
+  transform: scale(1.1);
+}
+
+.color-picker-input {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+/* ── Subtitle Editor ──────────────────────────────────────── */
+.subtitle-editor {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.sub-editor-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.sub-count {
+  font-weight: 600;
+}
+
+.sub-hint {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.sub-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-height: 500px;
+  overflow-y: auto;
+  padding-right: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.sub-row {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  background: var(--bg-primary);
+  padding: 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-light);
+}
+
+.sub-num {
+  color: var(--text-muted);
+  font-weight: 600;
+  min-width: 2ch;
+  margin-top: 0.5rem;
+}
+
+.sub-times {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.time-input {
+  width: 90px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.5rem;
+  color: var(--text-primary);
+  font-family: monospace;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.time-sep {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.sub-text {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem;
+  color: var(--text-primary);
+  resize: vertical;
+  min-height: 60px;
+}
+
+.sub-text:focus, .time-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.sub-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.sub-delete:hover {
+  color: var(--error);
+}
+
+.add-sub-btn {
+  width: 100%;
+  padding: 0.75rem;
+  background: transparent;
+  border: 1px dashed var(--border-light);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.add-sub-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-focus);
+  background: var(--bg-primary);
+}
+
+.empty-editor {
+  text-align: center;
+  padding: 3rem 1.5rem;
+}
+
+.empty-msg {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.empty-hint {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-bottom: 1.5rem;
+}
+
+/* ── Auto Review Details ──────────────────────────────────── */
+.review-header {
+  margin-bottom: 2rem;
+}
+.review-title {
+  font-size: 1.5rem;
+  margin-bottom: 0.25rem;
+}
+.review-sub {
+  color: var(--text-muted);
+}
+.review-actions {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+/* ── Progress Bar ─────────────────────────────────────────── */
+.progress-wrap {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-full);
+  height: 8px;
+  overflow: hidden;
+  margin: 1.5rem 0;
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.progress-bar {
+  background: var(--accent);
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.progress-pct {
+  position: absolute;
+  right: 0;
+  top: -20px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* ── Fixes for options grid ───────────────────────────────── */
+.options-panel {
+  margin-bottom: 2rem;
+}
+
 /* ── Footer ───────────────────────────────────────────────── */
 .footer {
   padding: 2rem;

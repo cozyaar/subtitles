@@ -1,395 +1,480 @@
-const express = require('express');
-const cors = require('cors');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-const { v4: uuidv4 } = require('uuid');
+/**
+ * SubBurner Server v2.0
+ *
+ * Endpoints:
+ *   POST /auto-process      → Start OCR pipeline, returns { jobId }
+ *   GET  /job-status/:id    → Poll OCR job progress
+ *   POST /finalize/:id      → Burn subtitles after user review
+ *   POST /process           → Manual transcript burn (unchanged)
+ *   POST /validate          → Validate transcript format (unchanged)
+ *   GET  /video/:filename   → Serve processed video
+ *   GET  /health            → Health check
+ */
 
-const app = express();
+'use strict';
+
+const express    = require('express');
+const cors       = require('cors');
+const multer     = require('multer');
+const path       = require('path');
+const fs         = require('fs');
+const ffmpeg     = require('fluent-ffmpeg');
+const installer  = require('@ffmpeg-installer/ffmpeg');
+ffmpeg.setFfmpegPath(installer.path);
+const { v4: uuidv4 }    = require('uuid');
+const { createWorker }  = require('tesseract.js');
+const strSim            = require('string-similarity');
+
+const app  = express();
 const PORT = 5000;
 
-// ── Directories ────────────────────────────────────────────────
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
-const OUTPUTS_DIR = path.join(__dirname, 'outputs');
-[UPLOADS_DIR, OUTPUTS_DIR].forEach((d) => {
-  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-});
+// ── Directories ───────────────────────────────────────────────
+const UPLOADS = path.join(__dirname, 'uploads');
+const OUTPUTS = path.join(__dirname, 'outputs');
+const FRAMES  = path.join(__dirname, 'frames');
+[UPLOADS, OUTPUTS, FRAMES].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
-// ── Middleware ──────────────────────────────────────────────────
+// ── In-memory Job Store ───────────────────────────────────────
+// jobId → { jobId, videoPath, fps, stage, message,
+//           totalFrames, processedFrames, subtitles, error }
+const jobs = new Map();
+
+// ── Middleware ────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
-app.use('/video', express.static(OUTPUTS_DIR));
+app.use('/video', express.static(OUTPUTS));
 
-// ── Multer config ──────────────────────────────────────────────
+// ── Multer ────────────────────────────────────────────────────
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${uuidv4()}${ext}`);
-  },
+  destination: (_, __, cb) => cb(null, UPLOADS),
+  filename:    (_, f,  cb) => cb(null, uuidv4() + path.extname(f.originalname)),
 });
-
 const upload = multer({
   storage,
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB
-  fileFilter: (_req, file, cb) => {
-    const allowed = /mp4|mov|avi|mkv|webm/;
-    const ext = path.extname(file.originalname).toLowerCase().replace('.', '');
-    if (allowed.test(ext)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only video files are allowed (mp4, mov, avi, mkv, webm)'));
-    }
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: (_, file, cb) => {
+    const ok = /\.(mp4|mov|avi|mkv|webm)$/i.test(file.originalname);
+    cb(ok ? null : new Error('Only video files allowed'), ok);
   },
 });
 
-// ── Helpers ────────────────────────────────────────────────────
+// ── Time Helpers ──────────────────────────────────────────────
+const p2 = n => String(Math.floor(n)).padStart(2, '0');
+const p3 = n => String(Math.floor(n)).padStart(3, '0');
 
-/**
- * Validate a timestamp string in HH:MM:SS or HH:MM:SS,mmm format.
- * Returns true if valid.
- */
-function isValidTimestamp(ts) {
-  return /^\d{2}:\d{2}:\d{2}(,\d{1,3})?$/.test(ts.trim());
+/** Decimal seconds → SRT timestamp HH:MM:SS,mmm */
+function secToSRT(s) {
+  s = Math.max(0, +s || 0);
+  return `${p2(s / 3600)}:${p2((s % 3600) / 60)}:${p2(s % 60)},${p3((s % 1) * 1000)}`;
 }
 
-/**
- * Convert HH:MM:SS or HH:MM:SS,mmm to total seconds.
- */
-function timestampToSeconds(ts) {
-  const cleaned = ts.trim().replace(',', '.');
-  const parts = cleaned.split(':');
-  const h = parseInt(parts[0], 10);
-  const m = parseInt(parts[1], 10);
-  const s = parseFloat(parts[2]);
-  return h * 3600 + m * 60 + s;
+/** Validate HH:MM:SS or HH:MM:SS,mmm */
+const isValidTs = ts => /^\d{2}:\d{2}:\d{2}(,\d{1,3})?$/.test((ts || '').trim());
+
+/** HH:MM:SS[,mmm] → decimal seconds */
+function tsToSec(ts) {
+  const [h, m, s] = ts.trim().replace(',', '.').split(':');
+  return +h * 3600 + +m * 60 + parseFloat(s);
 }
 
-/**
- * Normalize a timestamp to SRT format: HH:MM:SS,mmm
- */
-function normalizeTimestamp(ts) {
-  const cleaned = ts.trim();
-  // If already has comma with ms
-  if (/^\d{2}:\d{2}:\d{2},\d{3}$/.test(cleaned)) return cleaned;
-  // If has comma but less than 3 ms digits
-  if (/^\d{2}:\d{2}:\d{2},\d{1,2}$/.test(cleaned)) {
-    const [time, ms] = cleaned.split(',');
-    return `${time},${ms.padEnd(3, '0')}`;
+/** Normalize timestamp to strict HH:MM:SS,mmm */
+function normTs(ts) {
+  const t = (ts || '').trim();
+  if (/^\d{2}:\d{2}:\d{2},\d{3}$/.test(t))   return t;
+  if (/^\d{2}:\d{2}:\d{2},\d{1,2}$/.test(t)) {
+    const [d, ms] = t.split(',');
+    return `${d},${ms.padEnd(3, '0')}`;
   }
-  // No comma — just HH:MM:SS
-  if (/^\d{2}:\d{2}:\d{2}$/.test(cleaned)) return `${cleaned},000`;
-  return cleaned;
+  if (/^\d{2}:\d{2}:\d{2}$/.test(t))          return `${t},000`;
+  return t;
 }
 
-/**
- * Parse a timestamped transcript into structured subtitle data.
- *
- * Expected format:
- *   HH:MM:SS --> HH:MM:SS
- *   Subtitle text here
- *
- *   HH:MM:SS --> HH:MM:SS
- *   Next subtitle line
- *
- * @param {string} transcript
- * @returns {{ subtitles: Array, errors: string[] }}
- */
-function parseTimestampedTranscript(transcript) {
-  const lines = transcript.replace(/\r\n/g, '\n').split('\n');
-  const subtitles = [];
-  const errors = [];
+// ── SRT Generators ────────────────────────────────────────────
 
-  let i = 0;
-  let blockIndex = 1;
+/** OCR subtitles: { start: seconds, end: seconds, text } */
+function makeSRTFromSecs(subs) {
+  return subs
+    .filter(s => s.text?.trim())
+    .map((s, i) =>
+      `${i + 1}\n${secToSRT(+s.start)} --> ${secToSRT(+s.end)}\n${s.text.trim()}\n`
+    )
+    .join('\n');
+}
+
+/** Manual subtitles: { index, start: "HH:MM:SS,mmm", end, text } */
+function makeSRTFromManual(subs) {
+  return subs.map(s => `${s.index}\n${s.start} --> ${s.end}\n${s.text}\n`).join('\n');
+}
+
+// ── OCR Helpers ───────────────────────────────────────────────
+
+/** Strip non-printable ASCII, collapse whitespace */
+function cleanText(raw) {
+  return (raw || '')
+    .replace(/[^\x20-\x7E]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Return true if texts are ≥ threshold similar (Dice bigram coefficient) */
+function isSame(a, b, threshold = 0.80) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return strSim.compareTwoStrings(a, b) >= threshold;
+}
+
+// ── FFmpeg Helpers ────────────────────────────────────────────
+
+function extractFrames(videoPath, framesDir, fps) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(videoPath)
+      .outputOptions(['-vf', `fps=${fps}`, '-q:v', '2'])
+      .output(path.join(framesDir, 'frame_%04d.png'))
+      .on('end', () =>
+        resolve(fs.readdirSync(framesDir).filter(f => f.endsWith('.png')).length)
+      )
+      .on('error', reject)
+      .run();
+  });
+}
+
+/** Convert hex #RRGGBB → ASS &HαBBGGRR (alpha 00=opaque, FF=transparent) */
+function hexToAss(hex, alpha = '00') {
+  const h = (hex || '#FFFFFF').replace('#', '');
+  if (h.length !== 6) return `&H${alpha}FFFFFF`;
+  return `&H${alpha}${h.slice(4)}${h.slice(2, 4)}${h.slice(0, 2)}`;
+}
+
+function burnSubtitles(videoPath, srtPath, outputPath, opts = {}) {
+  const { fontSize = 26, fontColor = '#FFFFFF', alignment = 2 } = opts;
+  const primary = hexToAss(fontColor, '00');
+  const outline = hexToAss('#000000', '00');
+  const relSrt  = path.relative(__dirname, srtPath).replace(/\\/g, '/');
+
+  const filter =
+    `subtitles=${relSrt}:force_style='` +
+    `Alignment=${alignment},FontSize=${fontSize},FontName=Arial,` +
+    `PrimaryColour=${primary},OutlineColour=${outline},` +
+    `BackColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30'`;
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(videoPath)
+      .outputOptions(['-vf', filter, '-c:a', 'copy'])
+      .output(outputPath)
+      .on('progress', p => {
+        if (p.percent) process.stdout.write(`\r  🔥 Burning: ${p.percent.toFixed(1)}%`);
+      })
+      .on('end',   () => { console.log('\n  ✅ Burn complete'); resolve(); })
+      .on('error', err => { console.error('\n  ❌ FFmpeg error:', err.message); reject(err); })
+      .run();
+  });
+}
+
+// ── OCR Pipeline ──────────────────────────────────────────────
+
+async function runOCR(jobId) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+
+  const framesDir = path.join(FRAMES, jobId);
+
+  try {
+    // 1. Extract frames ─────────────────────────────────────────
+    fs.mkdirSync(framesDir, { recursive: true });
+    job.stage   = 'extracting';
+    job.message = 'Extracting frames from video…';
+    console.log(`\n[${jobId}] Extracting frames at ${job.fps} fps…`);
+
+    job.totalFrames = await extractFrames(job.videoPath, framesDir, job.fps);
+    console.log(`[${jobId}] ${job.totalFrames} frames extracted`);
+
+    if (job.totalFrames === 0) {
+      throw new Error('No frames could be extracted. Check the video format.');
+    }
+
+    // 2. OCR each frame ─────────────────────────────────────────
+    job.stage           = 'ocr';
+    job.processedFrames = 0;
+    job.message         = `Running OCR on ${job.totalFrames} frames…`;
+
+    const frameFiles = fs
+      .readdirSync(framesDir)
+      .filter(f => f.endsWith('.png'))
+      .sort();
+
+    const worker = await createWorker('eng');
+
+    const frameData = [];
+    for (let i = 0; i < frameFiles.length; i++) {
+      try {
+        const { data: { text } } = await worker.recognize(
+          path.join(framesDir, frameFiles[i])
+        );
+        frameData.push({ time: i / job.fps, text: cleanText(text) });
+      } catch {
+        frameData.push({ time: i / job.fps, text: '' }); // skip bad frames
+      }
+      job.processedFrames = i + 1;
+      job.message = `OCR: frame ${i + 1} / ${job.totalFrames}`;
+    }
+
+    await worker.terminate();
+    console.log(`[${jobId}] OCR complete`);
+
+    // 3. Detect text changes → subtitle segments ────────────────
+    job.stage   = 'analyzing';
+    job.message = 'Detecting text changes and building subtitle segments…';
+
+    const segments = [];
+    let cur = null, segStart = 0;
+
+    for (const { time, text } of frameData) {
+      // Skip frames with no meaningful text (< 3 chars after cleaning)
+      if (text.length < 3) {
+        if (cur !== null) {
+          segments.push({ start: segStart, end: time, text: cur });
+          cur = null;
+        }
+        continue;
+      }
+
+      if (cur === null) {
+        // Start new segment
+        cur      = text;
+        segStart = time;
+      } else if (!isSame(cur, text)) {
+        // Text changed significantly — close old, start new
+        segments.push({ start: segStart, end: time, text: cur });
+        cur      = text;
+        segStart = time;
+      }
+      // Same text → extend segment implicitly
+    }
+
+    // Close final segment
+    if (cur !== null) {
+      const last = frameData.at(-1);
+      segments.push({ start: segStart, end: last.time + 1 / job.fps, text: cur });
+    }
+
+    // 4. Cleanup frames ─────────────────────────────────────────
+    try { fs.rmSync(framesDir, { recursive: true, force: true }); } catch {}
+
+    job.stage     = 'done';
+    job.subtitles = segments.map((s, i) => ({ ...s, id: i }));
+    job.message   = `Found ${segments.length} subtitle block${segments.length !== 1 ? 's' : ''}.`;
+    console.log(`[${jobId}] ✅ Done — ${segments.length} segments`);
+
+  } catch (err) {
+    console.error(`[${jobId}] ❌ Pipeline error:`, err.message);
+    try { fs.rmSync(framesDir, { recursive: true, force: true }); } catch {}
+    job.stage   = 'error';
+    job.error   = err.message;
+    job.message = `Error: ${err.message}`;
+  }
+}
+
+// ── Manual Transcript Parser ──────────────────────────────────
+
+function parseTranscript(raw) {
+  const lines  = (raw || '').replace(/\r\n/g, '\n').split('\n');
+  const subs   = [];
+  const errors = [];
+  let i = 0, idx = 1;
 
   while (i < lines.length) {
-    // Skip empty lines
-    if (lines[i].trim() === '') {
-      i++;
-      continue;
-    }
+    if (!lines[i].trim()) { i++; continue; }
 
-    const currentLine = lines[i].trim();
-
-    // Try to match timestamp line: HH:MM:SS --> HH:MM:SS
-    const timestampMatch = currentLine.match(
+    const m = lines[i].trim().match(
       /^(\d{2}:\d{2}:\d{2}(?:,\d{1,3})?)\s*-->\s*(\d{2}:\d{2}:\d{2}(?:,\d{1,3})?)$/
     );
-
-    if (!timestampMatch) {
-      errors.push(`Line ${i + 1}: Invalid timestamp format: "${currentLine}"`);
+    if (!m) {
+      errors.push(`Line ${i + 1}: Invalid format — "${lines[i].trim()}"`);
       i++;
       continue;
     }
 
-    const rawStart = timestampMatch[1];
-    const rawEnd = timestampMatch[2];
-
-    // Validate timestamps
-    if (!isValidTimestamp(rawStart)) {
-      errors.push(`Line ${i + 1}: Invalid start time: "${rawStart}"`);
-      i++;
-      continue;
-    }
-    if (!isValidTimestamp(rawEnd)) {
-      errors.push(`Line ${i + 1}: Invalid end time: "${rawEnd}"`);
+    const [, rs, re] = m;
+    if (!isValidTs(rs)) { errors.push(`Line ${i + 1}: Bad start time "${rs}"`);  i++; continue; }
+    if (!isValidTs(re)) { errors.push(`Line ${i + 1}: Bad end time "${re}"`);    i++; continue; }
+    if (tsToSec(rs) >= tsToSec(re)) {
+      errors.push(`Line ${i + 1}: Start time must be before end time`);
       i++;
       continue;
     }
 
-    // Check start < end
-    const startSec = timestampToSeconds(rawStart);
-    const endSec = timestampToSeconds(rawEnd);
-    if (startSec >= endSec) {
-      errors.push(
-        `Line ${i + 1}: Start time (${rawStart}) must be before end time (${rawEnd})`
-      );
-      i++;
-      continue;
-    }
-
-    // Collect subtitle text lines (everything until next blank line or timestamp)
     i++;
     const textLines = [];
-
-    while (i < lines.length && lines[i].trim() !== '') {
-      // Check if this line is another timestamp (next block)
-      if (
-        /^\d{2}:\d{2}:\d{2}(,\d{1,3})?\s*-->\s*\d{2}:\d{2}:\d{2}(,\d{1,3})?$/.test(
-          lines[i].trim()
-        )
-      ) {
-        break;
-      }
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^\d{2}:\d{2}:\d{2}/.test(lines[i].trim())
+    ) {
       textLines.push(lines[i].trim());
       i++;
     }
 
     const text = textLines.join('\n');
+    if (!text) { errors.push(`Block ${idx}: No subtitle text after timestamp`); continue; }
 
-    if (!text) {
-      errors.push(`Block ${blockIndex}: Missing subtitle text after timestamp`);
-      continue;
-    }
-
-    subtitles.push({
-      index: blockIndex,
-      start: normalizeTimestamp(rawStart),
-      end: normalizeTimestamp(rawEnd),
-      text,
-    });
-
-    blockIndex++;
+    subs.push({ index: idx, start: normTs(rs), end: normTs(re), text });
+    idx++;
   }
 
-  return { subtitles, errors };
+  return { subtitles: subs, errors };
 }
 
-/**
- * Generate SRT content string from parsed subtitles.
- */
-function generateSRT(subtitles) {
-  return subtitles
-    .map(
-      (s) => `${s.index}\n${s.start} --> ${s.end}\n${s.text}\n`
-    )
-    .join('\n');
-}
+// ── API Routes ────────────────────────────────────────────────
 
-/**
- * Convert #RRGGBB hex color to ASS format &H[Alpha]BBGGRR
- */
-function hexToAssColor(hex, alpha = '40') {
-  if (!hex) return `&H${alpha}FFFFFF`;
-  const cleanHex = hex.replace('#', '');
-  if (cleanHex.length !== 6) return `&H${alpha}FFFFFF`;
-  const r = cleanHex.substring(0, 2);
-  const g = cleanHex.substring(2, 4);
-  const b = cleanHex.substring(4, 6);
-  // ASS format expects Blue then Green then Red -> BBGGRR
-  return `&H${alpha}${b}${g}${r}`;
-}
+/** POST /auto-process — start OCR pipeline, return { jobId } immediately */
+app.post('/auto-process', upload.single('video'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No video file uploaded' });
 
-/**
- * Burn subtitles into the video using FFmpeg.
- */
-function burnSubtitles(videoPath, srtPath, outputPath, options = {}) {
-  const { fontSize = 26, fontColor = '#FFFFFF', alignment = 2 } = options;
-  // Use a translucent alpha format (&H40 for text)
-  const assColor = hexToAssColor(fontColor, '40');
+  const fps   = Math.min(Math.max(parseFloat(req.body.fps) || 1, 0.25), 4);
+  const jobId = uuidv4();
 
-  return new Promise((resolve, reject) => {
-    // Make the SRT path relative to __dirname to avoid absolute path and space issues in ffmpeg filters on Windows
-    const relativeSrt = path.relative(__dirname, srtPath).replace(/\\/g, '/');
-
-    const subtitleFilter =
-      `subtitles=${relativeSrt}:force_style='` +
-      `Alignment=${alignment},` +
-      `FontSize=${fontSize},` +
-      `FontName=Arial,` +
-      `PrimaryColour=${assColor},` +
-      `OutlineColour=&H90000000,` +
-      `BackColour=&H00000000,` +
-      `BorderStyle=3,` +
-      `Outline=0,` +
-      `Shadow=0,` +
-      `MarginV=30'`;
-
-    ffmpeg(videoPath)
-      .outputOptions(['-vf', subtitleFilter, '-c:a', 'copy'])
-      .output(outputPath)
-      .on('start', (cmd) => console.log('  FFmpeg command:', cmd))
-      .on('progress', (p) => {
-        if (p.percent) {
-          process.stdout.write(`\r  Progress: ${p.percent.toFixed(1)}%`);
-        }
-      })
-      .on('end', () => {
-        console.log('\n  ✅ Subtitles burned successfully');
-        resolve(outputPath);
-      })
-      .on('error', (err) => {
-        console.error('\n  ❌ FFmpeg error:', err.message);
-        reject(err);
-      })
-      .run();
+  jobs.set(jobId, {
+    jobId,
+    fps,
+    videoPath:       req.file.path,
+    originalName:    req.file.originalname,
+    stage:           'queued',
+    message:         'Job queued, starting…',
+    totalFrames:     0,
+    processedFrames: 0,
+    subtitles:       null,
+    error:           null,
   });
-}
 
-// ── Routes ─────────────────────────────────────────────────────
+  console.log(`\n🎯 OCR job ${jobId} | "${req.file.originalname}" | fps=${fps}`);
+  setImmediate(() => runOCR(jobId));
+  res.json({ jobId });
+});
 
-/**
- * POST /process
- * Accepts: video file + timestamped transcript
- */
-app.post('/process', upload.single('video'), async (req, res) => {
-  const startTime = Date.now();
+/** GET /job-status/:jobId — poll job progress */
+app.get('/job-status/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const { jobId, stage, message, totalFrames, processedFrames, subtitles, error } = job;
+  res.json({ jobId, stage, message, totalFrames, processedFrames, subtitles, error });
+});
+
+/** POST /finalize/:jobId — burn edited subtitles into video */
+app.post('/finalize/:jobId', async (req, res) => {
+  const jobId = req.params.jobId;
+  const job   = jobs.get(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.stage !== 'done') {
+    return res.status(400).json({ error: `Job not ready for finalization (stage: ${job.stage})` });
+  }
 
   try {
-    // Validate inputs
-    if (!req.file) {
-      return res.status(400).json({ error: 'No video file uploaded' });
-    }
-
-    const transcript = req.body.transcript;
-    const fontSize = parseInt(req.body.fontSize, 10) || 26;
-    const fontColor = req.body.fontColor || '#FFFFFF';
+    const subs      = req.body.subtitles || job.subtitles;
+    const fontSize  = parseInt(req.body.fontSize,  10) || 26;
+    const fontColor = req.body.fontColor  || '#FFFFFF';
     const alignment = parseInt(req.body.alignment, 10) || 2;
 
-    if (!transcript || !transcript.trim()) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'Transcript text is required' });
-    }
+    if (!subs?.length) return res.status(400).json({ error: 'No subtitles provided' });
 
-    const videoPath = req.file.path;
-    const jobId = uuidv4();
-
-    console.log(`\n🎬 Processing job ${jobId}`);
-    console.log(`  Video: ${req.file.originalname}`);
-
-    // 1. Parse timestamped transcript
-    console.log('  📝 Parsing transcript...');
-    const { subtitles, errors } = parseTimestampedTranscript(transcript);
-
-    if (errors.length > 0) {
-      fs.unlinkSync(videoPath);
-      return res.status(400).json({
-        error: 'Transcript parsing failed',
-        details: errors,
-      });
-    }
-
-    if (subtitles.length === 0) {
-      fs.unlinkSync(videoPath);
-      return res.status(400).json({
-        error: 'No valid subtitle blocks found in transcript',
-      });
-    }
-
-    console.log(`  Found ${subtitles.length} subtitle blocks`);
-
-    // 2. Generate SRT file
-    const srtContent = generateSRT(subtitles);
-    const srtPath = path.join(UPLOADS_DIR, `${jobId}.srt`);
+    const srtContent = makeSRTFromSecs(subs);
+    const srtPath    = path.join(UPLOADS, `${jobId}.srt`);
     fs.writeFileSync(srtPath, srtContent, 'utf-8');
-    console.log(`  💾 SRT saved: ${srtPath}`);
+    console.log(`\n[${jobId}] SRT written (${subs.length} subtitles)`);
 
-    // 3. Burn subtitles into video
-    const outputFilename = `output_${jobId}.mp4`;
-    const outputPath = path.join(OUTPUTS_DIR, outputFilename);
+    const outFile = `output_${jobId}.mp4`;
+    const outPath = path.join(OUTPUTS, outFile);
+    await burnSubtitles(job.videoPath, srtPath, outPath, { fontSize, fontColor, alignment });
 
-    console.log(`  🔥 Burning subtitles (Size: ${fontSize}, Color: ${fontColor}, Align: ${alignment})...`);
-    await burnSubtitles(videoPath, srtPath, outputPath, { fontSize, fontColor, alignment });
+    try { fs.unlinkSync(job.videoPath); } catch {}
+    try { fs.unlinkSync(srtPath); } catch {}
 
-    // 4. Cleanup temp files
-    fs.unlinkSync(videoPath);
-    fs.unlinkSync(srtPath);
+    // Auto-clean job from memory after 30 minutes
+    setTimeout(() => jobs.delete(jobId), 30 * 60 * 1000);
 
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`  ⏱️  Total processing time: ${elapsed}s`);
+    res.json({ videoUrl: `/video/${outFile}`, srtContent, subtitles: subs });
 
-    // 5. Send response
-    res.json({
-      videoUrl: `/video/${outputFilename}`,
-      subtitles,
-      srtContent,
-      processingTime: `${elapsed}s`,
-    });
   } catch (err) {
-    console.error('Processing error:', err);
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+    console.error(`[${jobId}] Finalize error:`, err);
+    res.status(500).json({ error: `Burning failed: ${err.message}` });
+  }
+});
+
+/** POST /process — manual transcript → parse → burn */
+app.post('/process', upload.single('video'), async (req, res) => {
+  const t0 = Date.now();
+  if (!req.file) return res.status(400).json({ error: 'No video file uploaded' });
+
+  const transcript = req.body.transcript;
+  const videoPath  = req.file.path;
+
+  if (!transcript?.trim()) {
+    try { fs.unlinkSync(videoPath); } catch {}
+    return res.status(400).json({ error: 'Transcript is required' });
+  }
+
+  const jobId = uuidv4();
+  console.log(`\n📝 Manual job ${jobId} | "${req.file.originalname}"`);
+
+  try {
+    const { subtitles, errors } = parseTranscript(transcript);
+
+    if (errors.length) {
+      try { fs.unlinkSync(videoPath); } catch {}
+      return res.status(400).json({ error: 'Transcript parsing failed', details: errors });
     }
+    if (!subtitles.length) {
+      try { fs.unlinkSync(videoPath); } catch {}
+      return res.status(400).json({ error: 'No valid subtitle blocks found' });
+    }
+
+    const srtContent = makeSRTFromManual(subtitles);
+    const srtPath    = path.join(UPLOADS, `${jobId}.srt`);
+    fs.writeFileSync(srtPath, srtContent, 'utf-8');
+
+    const outFile = `output_${jobId}.mp4`;
+    const outPath = path.join(OUTPUTS, outFile);
+
+    await burnSubtitles(videoPath, srtPath, outPath, {
+      fontSize:  parseInt(req.body.fontSize,  10) || 26,
+      fontColor: req.body.fontColor  || '#FFFFFF',
+      alignment: parseInt(req.body.alignment, 10) || 2,
+    });
+
+    try { fs.unlinkSync(videoPath); } catch {}
+    try { fs.unlinkSync(srtPath); } catch {}
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    res.json({ videoUrl: `/video/${outFile}`, subtitles, srtContent, processingTime: `${elapsed}s` });
+
+  } catch (err) {
+    console.error('Manual process error:', err);
+    try { fs.unlinkSync(videoPath); } catch {}
     res.status(500).json({ error: `Processing failed: ${err.message}` });
   }
 });
 
-/**
- * POST /validate
- * Validates transcript without processing video — for live preview.
- */
-app.post('/validate', express.json(), (req, res) => {
+/** POST /validate — live transcript validation (no video needed) */
+app.post('/validate', (req, res) => {
   const { transcript } = req.body;
-  if (!transcript || !transcript.trim()) {
-    return res.status(400).json({ error: 'Transcript is required' });
-  }
-
-  const { subtitles, errors } = parseTimestampedTranscript(transcript);
-
+  if (!transcript?.trim()) return res.status(400).json({ error: 'Transcript required' });
+  const { subtitles, errors } = parseTranscript(transcript);
   res.json({
-    valid: errors.length === 0 && subtitles.length > 0,
+    valid:     !errors.length && subtitles.length > 0,
     subtitles,
     errors,
-    count: subtitles.length,
+    count:     subtitles.length,
   });
 });
 
-/**
- * GET /video/:filename
- * Serve processed videos
- */
-app.get('/video/:filename', (req, res) => {
-  const filePath = path.join(OUTPUTS_DIR, req.params.filename);
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Video not found' });
-  }
-  res.sendFile(filePath);
-});
+/** GET /health */
+app.get('/health', (_, res) =>
+  res.json({ status: 'ok', uptime: process.uptime(), activeJobs: jobs.size })
+);
 
-/**
- * GET /health
- */
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
-});
-
-// ── Start ──────────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🚀 Subtitle Burner Server running on http://localhost:${PORT}`);
-  console.log(`   Uploads → ${UPLOADS_DIR}`);
-  console.log(`   Outputs → ${OUTPUTS_DIR}\n`);
+  console.log(`\n🚀 SubBurner Server  →  http://localhost:${PORT}`);
+  console.log(`   uploads : ${UPLOADS}`);
+  console.log(`   outputs : ${OUTPUTS}`);
+  console.log(`   frames  : ${FRAMES}\n`);
 });
