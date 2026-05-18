@@ -151,21 +151,52 @@ function hexToAss(hex, alpha = '00') {
 }
 
 function burnSubtitles(videoPath, srtPath, outputPath, opts = {}) {
-  const { fontSize = 26, fontColor = '#FFFFFF', alignment = 2 } = opts;
+  const { 
+    fontSize = 26, 
+    fontColor = '#FFFFFF', 
+    alignment = 2,
+    fontName = 'Arial',
+    backgroundColor = '#000000',
+    borderStyle = 1,
+    outlineWidth = 2,
+    shadowDepth = 0
+  } = opts;
+
   const primary = hexToAss(fontColor, '00');
   const outline = hexToAss('#000000', '00');
-  const relSrt  = path.relative(__dirname, srtPath).replace(/\\/g, '/');
-
-  let filter =
-    `subtitles=${relSrt}:force_style='` +
-    `Alignment=${alignment},FontSize=${fontSize},FontName=Arial,` +
-    `PrimaryColour=${primary},OutlineColour=${outline},` +
-    `BackColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30'`;
+  
+  const boxOpacity = opts.boxOpacity !== undefined ? parseFloat(opts.boxOpacity) : 0.8;
+  const alpha = Math.floor((1 - boxOpacity) * 255).toString(16).padStart(2, '0').toUpperCase();
+  const back    = hexToAss(backgroundColor, alpha);
+  
+  let filter = '';
+  if (srtPath) {
+    const relSrt  = path.relative(__dirname, srtPath).replace(/\\/g, '/');
+    filter =
+      `subtitles=${relSrt}:force_style='` +
+      `Alignment=${alignment},FontSize=${fontSize},FontName=${fontName},` +
+      `PrimaryColour=${primary},OutlineColour=${outline},` +
+      `BackColour=${back},BorderStyle=${borderStyle},Outline=${outlineWidth},Shadow=${shadowDepth},MarginV=30,MarginL=30,MarginR=30'`;
+  }
 
   return new Promise((resolve, reject) => {
     const runFfmpeg = (finalFilter) => {
-      ffmpeg(videoPath)
-        .outputOptions(['-vf', finalFilter, '-c:a', 'copy'])
+      let command = ffmpeg(videoPath);
+      
+      const outputOpts = [];
+      if (finalFilter) {
+        outputOpts.push('-vf', finalFilter);
+      }
+      
+      if (opts.trimStart) outputOpts.push('-ss', opts.trimStart);
+      if (opts.trimEnd) outputOpts.push('-to', opts.trimEnd);
+      
+      // If we trim, copying audio might fail or cause desync if not handled well, 
+      // but let's try copy first as it's fast.
+      outputOpts.push('-c:a', 'copy');
+
+      command
+        .outputOptions(outputOpts)
         .output(outputPath)
         .on('progress', p => {
           if (p.percent) process.stdout.write(`\r  🔥 Burning: ${p.percent.toFixed(1)}%`);
@@ -175,17 +206,27 @@ function burnSubtitles(videoPath, srtPath, outputPath, opts = {}) {
         .run();
     };
 
+    // Construct filter chain
+    let baseFilter = filter;
+    
+    // Add crop if requested
+    if (opts.cropX !== undefined && opts.cropY !== undefined && opts.cropW && opts.cropH) {
+      const cropFilter = `crop=${opts.cropW}:${opts.cropH}:${opts.cropX}:${opts.cropY}`;
+      baseFilter = baseFilter ? `${cropFilter},${baseFilter}` : cropFilter;
+      console.log(`  ✂️ Applying crop: ${opts.cropW}x${opts.cropH} at ${opts.cropX},${opts.cropY}`);
+    }
+
     if (opts.removeWatermark) {
       ffmpeg.ffprobe(videoPath, (err, metadata) => {
         if (err) {
           console.error('  ⚠️ ffprobe failed:', err.message);
-          return runFfmpeg(filter); // Fallback to just subtitles
+          return runFfmpeg(baseFilter); // Fallback
         }
 
         const stream = metadata.streams.find(s => s.codec_type === 'video');
         if (!stream) {
           console.warn('  ⚠️ No video stream found for probe! Skipping delogo.');
-          return runFfmpeg(filter);
+          return runFfmpeg(baseFilter);
         }
 
         const { width, height } = stream;
@@ -205,15 +246,16 @@ function burnSubtitles(videoPath, srtPath, outputPath, opts = {}) {
         // Validate bounds after scaling
         if (x + w > width || y + h > height || x < 0 || y < 0) {
           console.warn(`  ⚠️ Watermark area (x=${x}, y=${y}, w=${w}, h=${h}) out of bounds for ${width}x${height} video! Skipping delogo.`);
-          runFfmpeg(filter);
+          runFfmpeg(baseFilter);
         } else {
-          const finalFilter = `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0,${filter}`;
+          const delogoFilter = `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0`;
+          const finalFilter = baseFilter ? `${delogoFilter},${baseFilter}` : delogoFilter;
           console.log(`  🧼 Applying delogo filter: x=${x}, y=${y}, w=${w}, h=${h}`);
           runFfmpeg(finalFilter);
         }
       });
     } else {
-      runFfmpeg(filter);
+      runFfmpeg(baseFilter);
     }
   });
 }
@@ -472,7 +514,15 @@ app.post('/finalize/:jobId', async (req, res) => {
 
     const outFile = `output_${jobId}.mp4`;
     const outPath = path.join(OUTPUTS, outFile);
-    await burnSubtitles(job.videoPath, srtPath, outPath, { fontSize, fontColor, alignment });
+    await burnSubtitles(job.videoPath, srtPath, outPath, { 
+      fontSize, fontColor, alignment,
+      fontName: req.body.fontName,
+      backgroundColor: req.body.backgroundColor,
+      borderStyle: req.body.borderStyle ? parseInt(req.body.borderStyle, 10) : undefined,
+      outlineWidth: req.body.outlineWidth ? parseInt(req.body.outlineWidth, 10) : undefined,
+      shadowDepth: req.body.shadowDepth ? parseInt(req.body.shadowDepth, 10) : undefined,
+      boxOpacity: req.body.boxOpacity ? parseFloat(req.body.boxOpacity) : undefined
+    });
 
     try { fs.unlinkSync(job.videoPath); } catch {}
     try { fs.unlinkSync(srtPath); } catch {}
@@ -535,12 +585,26 @@ app.post('/process', upload.single('video'), async (req, res) => {
     const outFile = `output_${jobId}.mp4`;
     const outPath = path.join(OUTPUTS, outFile);
 
+    const { trimStart, trimEnd, cropX, cropY, cropW, cropH } = req.body;
+
     await burnSubtitles(videoPath, srtPath, outPath, {
       fontSize:  parseInt(req.body.fontSize,  10) || 26,
       fontColor: req.body.fontColor  || '#FFFFFF',
       alignment: parseInt(req.body.alignment, 10) || 2,
       removeWatermark,
       watermarkCoords,
+      trimStart,
+      trimEnd,
+      cropX: cropX ? parseInt(cropX, 10) : undefined,
+      cropY: cropY ? parseInt(cropY, 10) : undefined,
+      cropW: cropW ? parseInt(cropW, 10) : undefined,
+      cropH: cropH ? parseInt(cropH, 10) : undefined,
+      fontName: req.body.fontName,
+      backgroundColor: req.body.backgroundColor,
+      borderStyle: req.body.borderStyle ? parseInt(req.body.borderStyle, 10) : undefined,
+      outlineWidth: req.body.outlineWidth ? parseInt(req.body.outlineWidth, 10) : undefined,
+      shadowDepth: req.body.shadowDepth ? parseInt(req.body.shadowDepth, 10) : undefined,
+      boxOpacity: req.body.boxOpacity ? parseFloat(req.body.boxOpacity) : undefined
     });
 
     try { fs.unlinkSync(videoPath); } catch {}
@@ -551,6 +615,54 @@ app.post('/process', upload.single('video'), async (req, res) => {
 
   } catch (err) {
     console.error('Manual process error:', err);
+    try { fs.unlinkSync(videoPath); } catch {}
+    res.status(500).json({ error: `Processing failed: ${err.message}` });
+  }
+});
+
+/** POST /edit-only — just trim and crop, no subtitles */
+app.post('/edit-only', upload.single('video'), async (req, res) => {
+  const t0 = Date.now();
+  if (!req.file) return res.status(400).json({ error: 'No video file uploaded' });
+
+  const videoPath  = req.file.path;
+  const jobId = uuidv4();
+  console.log(`\n✂️ Edit-only job ${jobId} | "${req.file.originalname}"`);
+
+  try {
+    const removeWatermark = req.body.removeWatermark === 'true' || req.body.removeWatermark === true;
+    let watermarkCoords = null;
+    if (req.body.watermarkCoords) {
+      try {
+        watermarkCoords = typeof req.body.watermarkCoords === 'string' 
+          ? JSON.parse(req.body.watermarkCoords) 
+          : req.body.watermarkCoords;
+      } catch (e) {}
+    }
+
+    const outFile = `output_${jobId}.mp4`;
+    const outPath = path.join(OUTPUTS, outFile);
+
+    const { trimStart, trimEnd, cropX, cropY, cropW, cropH } = req.body;
+
+    await burnSubtitles(videoPath, null, outPath, {
+      removeWatermark,
+      watermarkCoords,
+      trimStart,
+      trimEnd,
+      cropX: cropX ? parseInt(cropX, 10) : undefined,
+      cropY: cropY ? parseInt(cropY, 10) : undefined,
+      cropW: cropW ? parseInt(cropW, 10) : undefined,
+      cropH: cropH ? parseInt(cropH, 10) : undefined,
+    });
+
+    try { fs.unlinkSync(videoPath); } catch {}
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    res.json({ videoUrl: `/video/${outFile}`, processingTime: `${elapsed}s` });
+
+  } catch (err) {
+    console.error('Edit-only process error:', err);
     try { fs.unlinkSync(videoPath); } catch {}
     res.status(500).json({ error: `Processing failed: ${err.message}` });
   }

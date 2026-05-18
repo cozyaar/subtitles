@@ -84,13 +84,20 @@ function VideoDropzone({ file, onFileSelect, onRemove }) {
   );
 }
 
-function AppearanceOptions({ fontSize, fontColor, alignment, setFontSize, setFontColor, setAlignment }) {
+function AppearanceOptions({ 
+  fontSize, fontColor, alignment, setFontSize, setFontColor, setAlignment,
+  fontName, setFontName, backgroundColor, setBackgroundColor,
+  borderStyle, setBorderStyle, outlineWidth, setOutlineWidth, shadowDepth, setShadowDepth,
+  boxOpacity, setBoxOpacity
+}) {
   const COLORS = [
     { label: 'White',  value: '#FFFFFF' },
     { label: 'Yellow', value: '#FFFF00' },
     { label: 'Green',  value: '#00FF7F' },
     { label: 'Cyan',   value: '#00FFFF' },
   ];
+
+  const FONTS = ['Arial', 'Impact', 'Montserrat', 'Roboto', 'Times New Roman'];
 
   return (
     <div className="options-panel">
@@ -141,6 +148,119 @@ function AppearanceOptions({ fontSize, fontColor, alignment, setFontSize, setFon
                 onClick={() => setAlignment(v)}
               >{l}</button>
             ))}
+          </div>
+        </div>
+
+        {/* Font Name */}
+        <div className="option-group">
+          <label className="option-label">Font</label>
+          <select
+            value={fontName}
+            onChange={e => setFontName(e.target.value)}
+            className="transcript-textarea"
+            style={{ height: 'auto', padding: '0.5rem', width: '100%' }}
+          >
+            {FONTS.map(f => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </div>
+
+        {/* Style (Outline vs Box) */}
+        <div className="option-group">
+          <label className="option-label">Style</label>
+          <div className="speed-options">
+            {[{v:1,l:'Outline'},{v:3,l:'Opaque Box'}].map(({v,l}) => (
+              <button
+                key={v}
+                className={`speed-btn ${borderStyle === v ? 'active' : ''}`}
+                onClick={() => setBorderStyle(v)}
+              >{l}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Background Color */}
+        <div className="option-group">
+          <label className="option-label">{borderStyle === 1 ? 'Shadow Color' : 'Box Color'}</label>
+          <div className="color-options">
+            <input
+              type="color" value={backgroundColor}
+              onChange={e => setBackgroundColor(e.target.value.toUpperCase())}
+              title="Custom color"
+              className="color-picker-input"
+            />
+          </div>
+        </div>
+
+        {/* Box Opacity (Only for Box style) */}
+        {borderStyle === 3 && (
+          <div className="option-group">
+            <label className="option-label">Box Opacity</label>
+            <div className="font-size-control">
+              <input
+                type="range" className="font-slider"
+                min="0" max="100" value={boxOpacity * 100}
+                onChange={e => setBoxOpacity(+e.target.value / 100)}
+              />
+              <span className="font-value">{Math.floor(boxOpacity * 100)}%</span>
+            </div>
+          </div>
+        )}
+
+        {/* Outline Width */}
+        <div className="option-group">
+          <label className="option-label">Outline Width</label>
+          <div className="font-size-control">
+            <input
+              type="range" className="font-slider"
+              min="0" max="10" value={outlineWidth}
+              onChange={e => setOutlineWidth(+e.target.value)}
+            />
+            <span className="font-value">{outlineWidth}px</span>
+          </div>
+        </div>
+
+        {/* Shadow Depth */}
+        <div className="option-group">
+          <label className="option-label">Shadow Depth</label>
+          <div className="font-size-control">
+            <input
+              type="range" className="font-slider"
+              min="0" max="10" value={shadowDepth}
+              onChange={e => setShadowDepth(+e.target.value)}
+            />
+            <span className="font-value">{shadowDepth}px</span>
+          </div>
+        </div>
+
+        {/* Live Preview */}
+        <div className="option-group" style={{ gridColumn: 'span 2', marginTop: '1rem' }}>
+          <label className="option-label">Live Preview</label>
+          <div style={{
+            background: '#111',
+            padding: '2rem',
+            borderRadius: '8px',
+            border: '1px solid #333',
+            display: 'flex',
+            justifyContent: alignment === 2 ? 'center' : alignment === 1 ? 'flex-start' : 'flex-end',
+            alignItems: 'center',
+            minHeight: '100px',
+            overflow: 'hidden'
+          }}>
+            <div style={{
+              fontFamily: fontName,
+              fontSize: `${fontSize}px`,
+              color: fontColor,
+              textAlign: alignment === 2 ? 'center' : alignment === 1 ? 'left' : 'right',
+              padding: borderStyle === 3 ? '0.4rem 0.8rem' : '0',
+              background: borderStyle === 3 ? `${backgroundColor}${Math.floor(boxOpacity * 255).toString(16).padStart(2, '0').toUpperCase()}` : 'transparent',
+              borderRadius: '4px',
+              fontWeight: 'bold',
+              textShadow: borderStyle === 1 
+                ? `-${outlineWidth}px -${outlineWidth}px 0 #000, ${outlineWidth}px -${outlineWidth}px 0 #000, -${outlineWidth}px ${outlineWidth}px 0 #000, ${outlineWidth}px ${outlineWidth}px 0 #000`
+                : 'none'
+            }}>
+              Sample Subtitle Text
+            </div>
           </div>
         </div>
       </div>
@@ -447,6 +567,118 @@ export default function App() {
   const [mode, setMode] = useState('auto'); // 'auto' | 'manual' | 'audio'
   const [removeWatermark, setRemoveWatermark] = useState(true); // Default enabled for NotebookLM
 
+  // ── Live Edit state ───────────────────────────────────────────
+  const [trimStart, setTrimStart] = useState('');
+  const [trimEnd, setTrimEnd] = useState('');
+  const [cropX, setCropX] = useState('');
+  const [cropY, setCropY] = useState('');
+  const [cropW, setCropW] = useState('');
+  const [cropH, setCropH] = useState('');
+
+  const [cropBox, setCropBox] = useState({ x: 10, y: 10, w: 80, h: 80 }); // Percentages
+  const [isDraggingCrop, setIsDraggingCrop] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const [resizeDir, setResizeDir] = useState('br');
+
+  const [trimStartPct, setTrimStartPct] = useState(10);
+  const [trimEndPct, setTrimEndPct] = useState(90);
+  const [isDraggingTrimStart, setIsDraggingTrimStart] = useState(false);
+  const [isDraggingTrimEnd, setIsDraggingTrimEnd] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [isCropMode, setIsCropMode] = useState(false); // false = Trim Mode, true = Crop Mode
+  const [hasCustomCrop, setHasCustomCrop] = useState(false);
+
+  const formatTime = (s) => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = Math.floor(s % 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  };
+
+  useEffect(() => {
+    const handleWindowMouseMove = (e) => {
+      if (isDraggingCrop) {
+        const videoEl = document.getElementById('live-edit-video');
+        if (!videoEl) return;
+        const rect = videoEl.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * 100;
+        const y = ((e.clientY - rect.top) / rect.height) * 100;
+        
+        setCropBox(prev => {
+          const newX = Math.max(0, Math.min(100 - prev.w, x - prev.w / 2));
+          const newY = Math.max(0, Math.min(100 - prev.h, y - prev.h / 2));
+          setHasCustomCrop(true);
+          return { ...prev, x: newX, y: newY };
+        });
+      } else if (isResizing && resizeDir === 'br') {
+        const videoEl = document.getElementById('live-edit-video');
+        if (!videoEl) return;
+        const rect = videoEl.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * 100;
+        const y = ((e.clientY - rect.top) / rect.height) * 100;
+        
+        setCropBox(prev => {
+          const newW = Math.max(10, Math.min(100 - prev.x, x - prev.x));
+          const newH = Math.max(10, Math.min(100 - prev.y, y - prev.y));
+          setHasCustomCrop(true);
+          return { ...prev, w: newW, h: newH };
+        });
+      } else if (isDraggingTrimStart || isDraggingTrimEnd) {
+        const timelineEl = document.getElementById('timeline-bar');
+        if (!timelineEl) return;
+        const rect = timelineEl.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * 100;
+        
+        const videoEl = document.getElementById('live-edit-video');
+        
+        if (isDraggingTrimStart) {
+          const val = Math.max(0, Math.min(trimEndPct - 5, x));
+          setTrimStartPct(val);
+          if (videoEl && videoEl.duration) {
+            videoEl.currentTime = (val / 100) * videoEl.duration;
+          }
+        } else if (isDraggingTrimEnd) {
+          const val = Math.max(trimStartPct + 5, Math.min(100, x));
+          setTrimEndPct(val);
+          if (videoEl && videoEl.duration) {
+            videoEl.currentTime = (val / 100) * videoEl.duration;
+          }
+        }
+      }
+    };
+
+    const handleWindowMouseUp = () => {
+      setIsDraggingCrop(false);
+      setIsResizing(false);
+      setIsDraggingTrimStart(false);
+      setIsDraggingTrimEnd(false);
+    };
+
+    if (isDraggingCrop || isResizing || isDraggingTrimStart || isDraggingTrimEnd) {
+      window.addEventListener('mousemove', handleWindowMouseMove);
+      window.addEventListener('mouseup', handleWindowMouseUp);
+      
+      // Pause video if cropping
+      if (isDraggingCrop || isResizing) {
+        const videoEl = document.getElementById('live-edit-video');
+        if (videoEl) videoEl.pause();
+      }
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, [isDraggingCrop, isResizing, isDraggingTrimStart, isDraggingTrimEnd, resizeDir, trimStartPct, trimEndPct]);
+
+  // ── Subtitle Styling state ────────────────────────────────────
+  const [fontName, setFontName] = useState('Arial');
+  const [backgroundColor, setBackgroundColor] = useState('#000000');
+  const [boxOpacity, setBoxOpacity] = useState(0.8);
+  const [borderStyle, setBorderStyle] = useState(1); // 1 = Outline, 3 = Box
+  const [outlineWidth, setOutlineWidth] = useState(2);
+  const [shadowDepth, setShadowDepth] = useState(0);
+
   // ── Auto OCR state ────────────────────────────────────────────
   // autoStep: 'upload' | 'processing' | 'review' | 'burning' | 'result'
   const [autoStep,   setAutoStep]   = useState('upload');
@@ -579,7 +811,10 @@ export default function App() {
       const res  = await fetch(`${API}/finalize/${jobId}`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ subtitles, fontSize, fontColor, alignment }),
+        body:    JSON.stringify({ 
+          subtitles, fontSize, fontColor, alignment,
+          fontName, backgroundColor, borderStyle, outlineWidth, shadowDepth, boxOpacity 
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Finalization failed');
@@ -603,6 +838,18 @@ export default function App() {
     form.append('fontColor',  fontColor);
     form.append('alignment',  String(alignment));
     form.append('removeWatermark', String(removeWatermark));
+    form.append('trimStart', trimStart);
+    form.append('trimEnd', trimEnd);
+    form.append('fontName', fontName);
+    form.append('backgroundColor', backgroundColor);
+    form.append('borderStyle', String(borderStyle));
+    form.append('outlineWidth', String(outlineWidth));
+    form.append('shadowDepth', String(shadowDepth));
+    form.append('boxOpacity', String(boxOpacity));
+    form.append('cropX', cropX);
+    form.append('cropY', cropY);
+    form.append('cropW', cropW);
+    form.append('cropH', cropH);
 
     try {
       const res  = await fetch(`${API}/process`, { method: 'POST', body: form });
@@ -751,6 +998,17 @@ export default function App() {
                     <span className="mode-sub">Paste timestamped transcript</span>
                   </div>
                 </button>
+                <button
+                  className={`mode-btn ${mode === 'live' ? 'active' : ''}`}
+                  onClick={() => switchMode('live')}
+                  id="mode-live-btn"
+                >
+                  <span className="mode-icon">✂️</span>
+                  <div className="mode-text">
+                    <span className="mode-label">Live Edit</span>
+                    <span className="mode-sub">Visual trim & crop</span>
+                  </div>
+                </button>
               </div>
             )}
 
@@ -829,6 +1087,12 @@ export default function App() {
                       <AppearanceOptions
                         fontSize={fontSize} fontColor={fontColor} alignment={alignment}
                         setFontSize={setFontSize} setFontColor={setFontColor} setAlignment={setAlignment}
+                        fontName={fontName} setFontName={setFontName}
+                        backgroundColor={backgroundColor} setBackgroundColor={setBackgroundColor}
+                        borderStyle={borderStyle} setBorderStyle={setBorderStyle}
+                        outlineWidth={outlineWidth} setOutlineWidth={setOutlineWidth}
+                        shadowDepth={shadowDepth} setShadowDepth={setShadowDepth}
+                        boxOpacity={boxOpacity} setBoxOpacity={setBoxOpacity}
                       />
                     </div>
 
@@ -922,6 +1186,74 @@ export default function App() {
                           </>
                         )}
                       </div>
+
+                      {/* ✂️ Live Edit Card */}
+                      <div className="card">
+                        <div className="card-header">
+                          <div className="card-label">✂️ Live Edit</div>
+                          <div className="card-sublabel">Trim and Crop video</div>
+                        </div>
+                        
+                        <div style={{ marginBottom: '1rem' }}>
+                          <div style={{ fontWeight: 'bold', marginBottom: '0.5rem' }}>Trim</div>
+                          <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            <input
+                              type="text"
+                              placeholder="Start (00:00:00)"
+                              value={trimStart}
+                              onChange={e => setTrimStart(e.target.value)}
+                              className="transcript-textarea"
+                              style={{ height: 'auto', padding: '0.5rem' }}
+                            />
+                            <input
+                              type="text"
+                              placeholder="End (00:00:10)"
+                              value={trimEnd}
+                              onChange={e => setTrimEnd(e.target.value)}
+                              className="transcript-textarea"
+                              style={{ height: 'auto', padding: '0.5rem' }}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div style={{ fontWeight: 'bold', marginBottom: '0.5rem' }}>Crop</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                            <input
+                              type="number"
+                              placeholder="X"
+                              value={cropX}
+                              onChange={e => setCropX(e.target.value)}
+                              className="transcript-textarea"
+                              style={{ height: 'auto', padding: '0.5rem' }}
+                            />
+                            <input
+                              type="number"
+                              placeholder="Y"
+                              value={cropY}
+                              onChange={e => setCropY(e.target.value)}
+                              className="transcript-textarea"
+                              style={{ height: 'auto', padding: '0.5rem' }}
+                            />
+                            <input
+                              type="number"
+                              placeholder="Width"
+                              value={cropW}
+                              onChange={e => setCropW(e.target.value)}
+                              className="transcript-textarea"
+                              style={{ height: 'auto', padding: '0.5rem' }}
+                            />
+                            <input
+                              type="number"
+                              placeholder="Height"
+                              value={cropH}
+                              onChange={e => setCropH(e.target.value)}
+                              className="transcript-textarea"
+                              style={{ height: 'auto', padding: '0.5rem' }}
+                            />
+                          </div>
+                        </div>
+                      </div>
                     </div>
 
                     {/* Watermark Removal Section */}
@@ -954,6 +1286,12 @@ export default function App() {
                         <AppearanceOptions
                           fontSize={fontSize} fontColor={fontColor} alignment={alignment}
                           setFontSize={setFontSize} setFontColor={setFontColor} setAlignment={setAlignment}
+                          fontName={fontName} setFontName={setFontName}
+                          backgroundColor={backgroundColor} setBackgroundColor={setBackgroundColor}
+                          borderStyle={borderStyle} setBorderStyle={setBorderStyle}
+                          outlineWidth={outlineWidth} setOutlineWidth={setOutlineWidth}
+                          shadowDepth={shadowDepth} setShadowDepth={setShadowDepth}
+                          boxOpacity={boxOpacity} setBoxOpacity={setBoxOpacity}
                         />
                       </div>
                     )}
@@ -993,6 +1331,49 @@ export default function App() {
                           onRemove={() => setManualFile(null)}
                         />
                       </div>
+
+                      {/* Video Player in Manual Mode for Preview */}
+                      {manualFile && (
+                        <div className="card" style={{ marginTop: '2rem' }}>
+                          <div className="card-header">
+                            <div className="card-label">📺 Subtitle Preview</div>
+                            <div className="card-sublabel">See how subtitles look on the video</div>
+                          </div>
+                          <div style={{ position: 'relative', width: '100%', maxWidth: '640px', margin: '0 auto' }}>
+                            <video 
+                              id="manual-preview-video"
+                              src={URL.createObjectURL(manualFile)}
+                              controls
+                              style={{ width: '100%', borderRadius: '8px', display: 'block' }}
+                            />
+                            {/* Subtitle Overlay */}
+                            <div style={{
+                              position: 'absolute',
+                              bottom: '10%',
+                              left: '50%',
+                              transform: 'translateX(-50%)',
+                              width: '80%',
+                              textAlign: alignment === 2 ? 'center' : alignment === 1 ? 'left' : 'right',
+                              pointerEvents: 'none'
+                            }}>
+                              <span style={{
+                                fontFamily: fontName,
+                                fontSize: `${fontSize}px`,
+                                color: fontColor,
+                                padding: borderStyle === 3 ? '0.4rem 0.8rem' : '0',
+                                background: borderStyle === 3 ? `${backgroundColor}${Math.floor(boxOpacity * 255).toString(16).padStart(2, '0').toUpperCase()}` : 'transparent',
+                                borderRadius: '4px',
+                                fontWeight: 'bold',
+                                textShadow: borderStyle === 1 
+                                  ? `-${outlineWidth}px -${outlineWidth}px 0 #000, ${outlineWidth}px -${outlineWidth}px 0 #000, -${outlineWidth}px ${outlineWidth}px 0 #000, ${outlineWidth}px ${outlineWidth}px 0 #000`
+                                  : 'none'
+                              }}>
+                                Sample Subtitle Text
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
 
                       {/* Transcript */}
                       <div className="card">
@@ -1054,6 +1435,12 @@ export default function App() {
                     <AppearanceOptions
                       fontSize={fontSize} fontColor={fontColor} alignment={alignment}
                       setFontSize={setFontSize} setFontColor={setFontColor} setAlignment={setAlignment}
+                      fontName={fontName} setFontName={setFontName}
+                      backgroundColor={backgroundColor} setBackgroundColor={setBackgroundColor}
+                      borderStyle={borderStyle} setBorderStyle={setBorderStyle}
+                      outlineWidth={outlineWidth} setOutlineWidth={setOutlineWidth}
+                      shadowDepth={shadowDepth} setShadowDepth={setShadowDepth}
+                      boxOpacity={boxOpacity} setBoxOpacity={setBoxOpacity}
                     />
 
                     {/* Live parse preview */}
@@ -1076,6 +1463,353 @@ export default function App() {
                   </div>
                 )}
               </>
+            )}
+
+            {/* ══ LIVE EDIT MODE ════════════════════════════════════ */}
+            {mode === 'live' && (
+              <div className="animate-in">
+                {!manualFile ? (
+                  <div className="card">
+                    <div className="card-header">
+                      <div className="card-label">Upload Video</div>
+                      <div className="card-sublabel">Select a video to edit</div>
+                    </div>
+                    <VideoDropzone 
+                      file={manualFile} 
+                      onFileSelect={setManualFile} 
+                      onRemove={() => setManualFile(null)} 
+                    />
+                  </div>
+                ) : (
+                  <div className="card">
+                    <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div className="card-label">✂️ Live Edit</div>
+                        <div className="card-sublabel">Visual Trim and Crop</div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.85rem', color: '#aaa' }}>{isCropMode ? 'Crop Mode' : 'Trim Mode'}</span>
+                        <label className="switch" style={{ position: 'relative', display: 'inline-block', width: '40px', height: '20px' }}>
+                          <input 
+                            type="checkbox" 
+                            checked={isCropMode} 
+                            onChange={e => setIsCropMode(e.target.checked)}
+                            style={{ opacity: 0, width: 0, height: 0 }}
+                          />
+                          <span style={{
+                            position: 'absolute',
+                            cursor: 'pointer',
+                            top: 0, left: 0, right: 0, bottom: 0,
+                            background: isCropMode ? '#00FF7F' : '#007bff',
+                            transition: '.4s',
+                            borderRadius: '20px'
+                          }}>
+                            <span style={{
+                              position: 'absolute',
+                              height: '16px', 
+                              width: '16px',
+                              left: isCropMode ? '22px' : '2px',
+                              bottom: '2px',
+                              background: '#fff',
+                              transition: '.4s',
+                              borderRadius: '50%',
+                              display: 'block'
+                            }} />
+                          </span>
+                        </label>
+                      </div>
+                    </div>
+                    
+                    <div style={{ position: 'relative', width: '100%', maxWidth: '640px', margin: '0 auto' }}>
+                      <video 
+                        id="live-edit-video"
+                        controls 
+                        style={{ width: '100%', display: 'block' }}
+                        src={manualFile ? URL.createObjectURL(manualFile) : ''}
+                        onLoadedMetadata={e => setVideoDuration(e.target.duration)}
+                      />
+                      {/* Visual Crop Overlay */}
+                      {isCropMode && (
+                        <div 
+                          style={{
+                            position: 'absolute',
+                            top: `${cropBox.y}%`,
+                            left: `${cropBox.x}%`,
+                            width: `${cropBox.w}%`,
+                            height: `${cropBox.h}%`,
+                            border: '2px dashed #00FF7F',
+                            boxSizing: 'border-box',
+                            cursor: 'move',
+                            background: 'rgba(0, 255, 127, 0.1)'
+                          }}
+                          onMouseDown={e => {
+                            if (e.target.className.includes('resize-handle')) return;
+                            e.preventDefault();
+                            setIsDraggingCrop(true);
+                          }}
+                        >
+                          <div style={{ position: 'absolute', top: 0, left: 0, background: '#00FF7F', color: '#000', fontSize: '0.8rem', padding: '0.2rem' }}>Crop Area</div>
+                          
+                          {/* Bottom-Right Handle for Resizing */}
+                          <div 
+                            className="resize-handle"
+                            style={{ 
+                              position: 'absolute', 
+                              bottom: -5, 
+                              right: -5, 
+                              width: 10, 
+                              height: 10, 
+                              background: '#fff', 
+                              border: '1px solid #00FF7F', 
+                              cursor: 'nwse-resize' 
+                            }} 
+                            onMouseDown={e => { 
+                              e.stopPropagation(); 
+                              setIsResizing(true); 
+                              setResizeDir('br'); 
+                            }} 
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Video Timeline Overlay */}
+                    {!isCropMode && (
+                      <div style={{ marginTop: '2.5rem', padding: '0 1rem' }}>
+                        <label style={{ fontSize: '0.85rem', color: '#aaa', display: 'block', marginBottom: '1rem' }}>Timeline Trim</label>
+                        <div 
+                          id="timeline-bar"
+                          style={{ 
+                            position: 'relative', 
+                            width: '100%', 
+                            height: '40px', 
+                            background: '#1a1a1a', 
+                            borderRadius: '4px',
+                            overflow: 'visible', /* Allow labels to float above */
+                            border: '1px solid #333'
+                          }}
+                        >
+                          {/* Active Area */}
+                          <div style={{ 
+                            position: 'absolute', 
+                            left: `${trimStartPct}%`, 
+                            width: `${trimEndPct - trimStartPct}%`, 
+                            height: '100%', 
+                            background: 'rgba(0, 255, 127, 0.2)',
+                            borderLeft: '2px solid #00FF7F',
+                            borderRight: '2px solid #00FF7F'
+                          }} />
+                          
+                          {/* Floating Time Labels */}
+                          <div 
+                            style={{ 
+                              position: 'absolute', 
+                              left: `${trimStartPct}%`, 
+                              top: '-25px', 
+                              transform: 'translateX(-50%)',
+                              fontSize: '0.75rem',
+                              color: '#00FF7F',
+                              background: '#1a1a1a',
+                              padding: '0.1rem 0.3rem',
+                              borderRadius: '2px',
+                              border: '1px solid #333',
+                              whiteSpace: 'nowrap',
+                              cursor: 'pointer'
+                            }}
+                            onClick={() => document.getElementById('trim-start-input').focus()}
+                          >
+                            {formatTime((trimStartPct / 100) * videoDuration)}
+                          </div>
+                          
+                          <div 
+                            style={{ 
+                              position: 'absolute', 
+                              left: `${trimEndPct}%`, 
+                              top: '-25px', 
+                              transform: 'translateX(-50%)',
+                              fontSize: '0.75rem',
+                              color: '#00FF7F',
+                              background: '#1a1a1a',
+                              padding: '0.1rem 0.3rem',
+                              borderRadius: '2px',
+                              border: '1px solid #333',
+                              whiteSpace: 'nowrap',
+                              cursor: 'pointer'
+                            }}
+                            onClick={() => document.getElementById('trim-end-input').focus()}
+                          >
+                            {formatTime((trimEndPct / 100) * videoDuration)}
+                          </div>
+                          
+                          {/* Trim Handles */}
+                          <div 
+                            style={{ 
+                              position: 'absolute', 
+                              left: `${trimStartPct}%`, 
+                              width: '16px', 
+                              height: '100%', 
+                              background: '#00FF7F', 
+                              cursor: 'col-resize',
+                              transform: 'translateX(-50%)',
+                              zIndex: 10
+                            }}
+                            onMouseDown={e => { e.stopPropagation(); setIsDraggingTrimStart(true); }}
+                          />
+                          <div 
+                            style={{ 
+                              position: 'absolute', 
+                              left: `${trimEndPct}%`, 
+                              width: '16px', 
+                              height: '100%', 
+                              background: '#00FF7F', 
+                              cursor: 'col-resize',
+                              transform: 'translateX(-50%)',
+                              zIndex: 10
+                            }}
+                            onMouseDown={e => { e.stopPropagation(); setIsDraggingTrimEnd(true); }}
+                          />
+                          
+                          {/* Mock Thumbnails */}
+                          <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center', height: '100%', opacity: 0.3 }}>
+                            <span>🎞️</span><span>🎞️</span><span>🎞️</span><span>🎞️</span>
+                          </div>
+                        </div>
+                        
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#888', marginTop: '0.25rem' }}>
+                          <span>{trimStartPct.toFixed(0)}%</span>
+                          <span>{trimEndPct.toFixed(0)}%</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Precision Inputs */}
+                    <div className="options-panel" style={{ marginTop: '1rem' }}>
+                      <div className="options-grid">
+                        <div className="option-group">
+                          <label className="option-label">Trim Start</label>
+                          <input id="trim-start-input" type="text" value={trimStart} onChange={e => setTrimStart(e.target.value)} className="transcript-textarea" style={{ height: 'auto', padding: '0.5rem' }} placeholder="00:00:00" />
+                        </div>
+                        <div className="option-group">
+                          <label className="option-label">Trim End</label>
+                          <input id="trim-end-input" type="text" value={trimEnd} onChange={e => setTrimEnd(e.target.value)} className="transcript-textarea" style={{ height: 'auto', padding: '0.5rem' }} placeholder="00:00:10" />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="submit-section" style={{ marginTop: '1rem', display: 'flex', gap: '1rem' }}>
+                      <button
+                        className="submit-btn"
+                        style={{ background: '#333', color: '#fff' }}
+                        onClick={() => {
+                          const videoEl = document.getElementById('live-edit-video');
+                          if (!videoEl) return;
+                          
+                          // Convert Trim Pct to Time Strings
+                          const duration = videoEl.duration || 0;
+                          const startSec = (trimStartPct / 100) * duration;
+                          const endSec = (trimEndPct / 100) * duration;
+                          
+                          const formatTime = (s) => {
+                            const h = Math.floor(s / 3600);
+                            const m = Math.floor((s % 3600) / 60);
+                            const sec = Math.floor(s % 60);
+                            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+                          };
+                          
+                          setTrimStart(formatTime(startSec));
+                          setTrimEnd(formatTime(endSec));
+                          
+                          // Convert Crop Box Pct to Pixels if customized
+                          if (hasCustomCrop) {
+                            const actualW = videoEl.videoWidth;
+                            const actualH = videoEl.videoHeight;
+                            
+                            setCropX(String(Math.floor((cropBox.x / 100) * actualW)));
+                            setCropY(String(Math.floor((cropBox.y / 100) * actualH)));
+                            setCropW(String(Math.floor((cropBox.w / 100) * actualW)));
+                            setCropH(String(Math.floor((cropBox.h / 100) * actualH)));
+                          } else {
+                            setCropX('');
+                            setCropY('');
+                            setCropW('');
+                            setCropH('');
+                          }
+                          
+                          alert('Edits applied! You can now switch to Audio or Manual mode to process.');
+                        }}
+                      >
+                        💾 Save Edits
+                      </button>
+                      
+                      <button
+                        className="submit-btn"
+                        onClick={async () => {
+                          const videoEl = document.getElementById('live-edit-video');
+                          if (!videoEl) return;
+                          
+                          const duration = videoEl.duration || 0;
+                          const startSec = (trimStartPct / 100) * duration;
+                          const endSec = (trimEndPct / 100) * duration;
+                          
+                          const formatTime = (s) => {
+                            const h = Math.floor(s / 3600);
+                            const m = Math.floor((s % 3600) / 60);
+                            const sec = Math.floor(s % 60);
+                            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+                          };
+                          
+                          const actualW = videoEl.videoWidth;
+                          const actualH = videoEl.videoHeight;
+                          
+                          const form = new FormData();
+                          form.append('video', manualFile);
+                          form.append('trimStart', formatTime(startSec));
+                          form.append('trimEnd', formatTime(endSec));
+                          
+                          if (hasCustomCrop) {
+                            form.append('cropX', String(Math.floor((cropBox.x / 100) * actualW)));
+                            form.append('cropY', String(Math.floor((cropBox.y / 100) * actualH)));
+                            form.append('cropW', String(Math.floor((cropBox.w / 100) * actualW)));
+                            form.append('cropH', String(Math.floor((cropBox.h / 100) * actualH)));
+                          }
+                          
+                          setManualProcessing(true);
+                          
+                          try {
+                            const res = await fetch('http://localhost:5000/edit-only', {
+                              method: 'POST',
+                              body: form
+                            });
+                            const data = await res.json();
+                            if (data.error) throw new Error(data.error);
+                            
+                            // Trigger automatic download
+                            const a = document.createElement('a');
+                            a.href = `http://localhost:5000${data.videoUrl}`;
+                            a.download = 'edited_video.mp4';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+
+                            setResult({
+                              videoUrl: data.videoUrl, // Fix: don't double include domain
+                              srtContent: '',
+                              processingTime: data.processingTime
+                            });
+                          } catch (err) {
+                            alert(`Failed: ${err.message}`);
+                          } finally {
+                            setManualProcessing(false);
+                          }
+                        }}
+                      >
+                        ✂️ Process & Download
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </>
         )}
