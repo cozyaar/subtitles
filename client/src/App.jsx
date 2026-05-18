@@ -444,7 +444,8 @@ Let's get started right away.`;
 
 export default function App() {
   // ── Mode ──────────────────────────────────────────────────────
-  const [mode, setMode] = useState('auto'); // 'auto' | 'manual'
+  const [mode, setMode] = useState('auto'); // 'auto' | 'manual' | 'audio'
+  const [removeWatermark, setRemoveWatermark] = useState(true); // Default enabled for NotebookLM
 
   // ── Auto OCR state ────────────────────────────────────────────
   // autoStep: 'upload' | 'processing' | 'review' | 'burning' | 'result'
@@ -548,6 +549,27 @@ export default function App() {
     }
   }
 
+  async function startAutoAudio() {
+    if (!manualFile) return;
+    setAutoError(null);
+    setAutoStep('processing');
+    
+    const form = new FormData();
+    form.append('video', manualFile);
+
+    try {
+      const res  = await fetch(`${API}/transcribe`, { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to transcribe audio');
+      
+      setTranscript(data.transcript);
+      setAutoStep('upload');
+    } catch (err) {
+      setAutoError(err.message);
+      setAutoStep('upload');
+    }
+  }
+
   async function finalize() {
     if (!jobId || !subtitles.length) return;
     setAutoStep('burning');
@@ -580,6 +602,7 @@ export default function App() {
     form.append('fontSize',   String(fontSize));
     form.append('fontColor',  fontColor);
     form.append('alignment',  String(alignment));
+    form.append('removeWatermark', String(removeWatermark));
 
     try {
       const res  = await fetch(`${API}/process`, { method: 'POST', body: form });
@@ -695,6 +718,17 @@ export default function App() {
             {/* Mode Selector */}
             {showModeSwitch && (
               <div className="mode-selector animate-in">
+                <button
+                  className={`mode-btn ${mode === 'audio' ? 'active' : ''}`}
+                  onClick={() => switchMode('audio')}
+                  id="mode-audio-btn"
+                >
+                  <span className="mode-icon">🎙️</span>
+                  <div className="mode-text">
+                    <span className="mode-label">Auto Audio</span>
+                    <span className="mode-sub">Transcribe spoken audio</span>
+                  </div>
+                </button>
                 <button
                   className={`mode-btn ${mode === 'auto' ? 'active' : ''}`}
                   onClick={() => switchMode('auto')}
@@ -819,6 +853,126 @@ export default function App() {
               </>
             )}
 
+            {/* ══ AUTO AUDIO MODE ══════════════════════════════════ */}
+            {mode === 'audio' && (
+              <>
+                {autoStep === 'processing' && (
+                  <div className="processing-overlay">
+                    <div className="processing-card">
+                      <div className="processing-spinner" />
+                      <h2 className="processing-title">Transcribing Audio</h2>
+                      <p className="processing-subtitle">Extracting audio and running Whisper…</p>
+                    </div>
+                  </div>
+                )}
+
+                {autoStep === 'upload' && (
+                  <div className="animate-in">
+                    <div className="upload-grid">
+                      {/* Video upload */}
+                      <div className="card">
+                        <div className="card-header">
+                          <div className="card-label">Video File</div>
+                          <div className="card-sublabel">Upload video for transcription</div>
+                        </div>
+                        <VideoDropzone
+                          file={manualFile}
+                          onFileSelect={setManualFile}
+                          onRemove={() => setManualFile(null)}
+                        />
+                      </div>
+
+                      {/* Transcript or Generate Button */}
+                      <div className="card">
+                        <div className="card-header">
+                          <div className="card-label">Transcript</div>
+                          <div className="card-sublabel">Generated or manual subtitles</div>
+                        </div>
+                        
+                        {!transcript && (
+                          <div className="generate-placeholder">
+                            <button
+                              className="submit-btn"
+                              disabled={!manualFile}
+                              onClick={startAutoAudio}
+                              id="generate-subtitles-btn"
+                            >
+                              {manualFile ? '🎙️ Generate Subtitles' : '📁 Upload a Video First'}
+                            </button>
+                          </div>
+                        )}
+
+                        {transcript && (
+                          <>
+                            <textarea
+                              id="transcript-input-audio"
+                              className="transcript-textarea"
+                              placeholder="Generated subtitles will appear here…"
+                              value={transcript}
+                              onChange={e => setTranscript(e.target.value)}
+                            />
+                            <div className="char-count">
+                              {transcript.length} characters
+                              {manualParsed.subtitles.length > 0 && (
+                                <span className="parse-status valid">
+                                  &nbsp;· {manualParsed.subtitles.length} block{manualParsed.subtitles.length > 1 ? 's' : ''} ✓
+                                </span>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Watermark Removal Section */}
+                    <div className="card" style={{ marginTop: '2rem' }}>
+                      <div className="card-header">
+                        <div className="card-label">🧼 Watermark Removal</div>
+                        <div className="card-sublabel">Remove static NotebookLM watermark from bottom-right</div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={removeWatermark}
+                            onChange={e => setRemoveWatermark(e.target.checked)}
+                            style={{ width: '1.2rem', height: '1.2rem' }}
+                          />
+                          <span>Remove NotebookLM Watermark</span>
+                        </label>
+                      </div>
+                      
+                      {removeWatermark && (
+                        <div style={{ marginTop: '1rem', fontSize: '0.9rem', color: '#888' }}>
+                          Default coordinates for 1920x1080: x=1615, y=965, w=250, h=70
+                        </div>
+                      )}
+                    </div>
+
+                    {transcript && (
+                      <div style={{ marginTop: '2rem' }}>
+                        <AppearanceOptions
+                          fontSize={fontSize} fontColor={fontColor} alignment={alignment}
+                          setFontSize={setFontSize} setFontColor={setFontColor} setAlignment={setAlignment}
+                        />
+                      </div>
+                    )}
+
+                    <div className="submit-section" style={{ marginTop: '2rem' }}>
+                      <button
+                        className="submit-btn"
+                        disabled={!manualFile || !transcript.trim() || manualParsed.errors.length > 0}
+                        onClick={handleManualSubmit}
+                        id="burn-audio-btn"
+                      >
+                        {manualFile ? '🔥 Burn Subtitles Into Video' : '📁 Upload a Video First'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
             {/* ══ MANUAL MODE ════════════════════════════════════ */}
             {mode === 'manual' && (
               <>
@@ -869,6 +1023,31 @@ export default function App() {
                           )}
                         </div>
                       </div>
+                    </div>
+
+                    {/* Watermark Removal Section */}
+                    <div className="card" style={{ marginTop: '2rem' }}>
+                      <div className="card-header">
+                        <div className="card-label">🧼 Watermark Removal</div>
+                        <div className="card-sublabel">Remove static NotebookLM watermark from bottom-right</div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={removeWatermark}
+                            onChange={e => setRemoveWatermark(e.target.checked)}
+                            style={{ width: '1.2rem', height: '1.2rem' }}
+                          />
+                          <span>Remove NotebookLM Watermark</span>
+                        </label>
+                      </div>
+                      
+                      {removeWatermark && (
+                        <div style={{ marginTop: '1rem', fontSize: '0.9rem', color: '#888' }}>
+                          Default coordinates for 1920x1080: x=1615, y=965, w=250, h=70
+                        </div>
+                      )}
                     </div>
 
                     {/* Appearance */}

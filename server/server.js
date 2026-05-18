@@ -13,6 +13,8 @@
 
 'use strict';
 
+require('dotenv').config();
+
 const express    = require('express');
 const cors       = require('cors');
 const multer     = require('multer');
@@ -24,6 +26,9 @@ ffmpeg.setFfmpegPath(installer.path);
 const { v4: uuidv4 }    = require('uuid');
 const { createWorker }  = require('tesseract.js');
 const strSim            = require('string-similarity');
+
+const { extractAudio, transcribeAudio } = require('./transcriptionService');
+const { formatSubtitles } = require('./subtitleFormatter');
 
 const app  = express();
 const PORT = 5000;
@@ -151,22 +156,65 @@ function burnSubtitles(videoPath, srtPath, outputPath, opts = {}) {
   const outline = hexToAss('#000000', '00');
   const relSrt  = path.relative(__dirname, srtPath).replace(/\\/g, '/');
 
-  const filter =
+  let filter =
     `subtitles=${relSrt}:force_style='` +
     `Alignment=${alignment},FontSize=${fontSize},FontName=Arial,` +
     `PrimaryColour=${primary},OutlineColour=${outline},` +
     `BackColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30'`;
 
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
-      .outputOptions(['-vf', filter, '-c:a', 'copy'])
-      .output(outputPath)
-      .on('progress', p => {
-        if (p.percent) process.stdout.write(`\r  🔥 Burning: ${p.percent.toFixed(1)}%`);
-      })
-      .on('end',   () => { console.log('\n  ✅ Burn complete'); resolve(); })
-      .on('error', err => { console.error('\n  ❌ FFmpeg error:', err.message); reject(err); })
-      .run();
+    const runFfmpeg = (finalFilter) => {
+      ffmpeg(videoPath)
+        .outputOptions(['-vf', finalFilter, '-c:a', 'copy'])
+        .output(outputPath)
+        .on('progress', p => {
+          if (p.percent) process.stdout.write(`\r  🔥 Burning: ${p.percent.toFixed(1)}%`);
+        })
+        .on('end',   () => { console.log('\n  ✅ Burn complete'); resolve(); })
+        .on('error', err => { console.error('\n  ❌ FFmpeg error:', err.message); reject(err); })
+        .run();
+    };
+
+    if (opts.removeWatermark) {
+      ffmpeg.ffprobe(videoPath, (err, metadata) => {
+        if (err) {
+          console.error('  ⚠️ ffprobe failed:', err.message);
+          return runFfmpeg(filter); // Fallback to just subtitles
+        }
+
+        const stream = metadata.streams.find(s => s.codec_type === 'video');
+        if (!stream) {
+          console.warn('  ⚠️ No video stream found for probe! Skipping delogo.');
+          return runFfmpeg(filter);
+        }
+
+        const { width, height } = stream;
+        let { x = 1615, y = 965, w = 250, h = 70 } = opts.watermarkCoords || {};
+
+        // Automatic coordinate scaling for different resolutions
+        if (width !== 1920 || height !== 1080) {
+          const scaleX = width / 1920;
+          const scaleY = height / 1080;
+          x = Math.round(x * scaleX);
+          y = Math.round(y * scaleY);
+          w = Math.round(w * scaleX);
+          h = Math.round(h * scaleY);
+          console.log(`  🧼 Scaled coordinates for ${width}x${height}: x=${x}, y=${y}, w=${w}, h=${h}`);
+        }
+
+        // Validate bounds after scaling
+        if (x + w > width || y + h > height || x < 0 || y < 0) {
+          console.warn(`  ⚠️ Watermark area (x=${x}, y=${y}, w=${w}, h=${h}) out of bounds for ${width}x${height} video! Skipping delogo.`);
+          runFfmpeg(filter);
+        } else {
+          const finalFilter = `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0,${filter}`;
+          console.log(`  🧼 Applying delogo filter: x=${x}, y=${y}, w=${w}, h=${h}`);
+          runFfmpeg(finalFilter);
+        }
+      });
+    } else {
+      runFfmpeg(filter);
+    }
   });
 }
 
@@ -351,6 +399,47 @@ app.post('/auto-process', upload.single('video'), (req, res) => {
   res.json({ jobId });
 });
 
+/** POST /transcribe — upload video, transcribe audio, return subtitles */
+app.post('/transcribe', upload.single('video'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No video file uploaded' });
+
+  const videoPath = req.file.path;
+  const audioPath = path.join(UPLOADS, `${uuidv4()}.mp3`);
+
+  try {
+    console.log(`\n🎙️ Transcription job | "${req.file.originalname}"`);
+    
+    // 1. Extract audio
+    console.log('  Extracting audio…');
+    await extractAudio(videoPath, audioPath);
+    
+    // 2. Transcribe
+    console.log('  Transcribing with Whisper…');
+    const whisperData = await transcribeAudio(audioPath);
+    
+    // 3. Format subtitles
+    console.log('  Formatting subtitles…');
+    const transcript = formatSubtitles(whisperData);
+    
+    // Cleanup audio file
+    try { fs.unlinkSync(audioPath); } catch {}
+    // Cleanup video file since frontend will upload it again for burning
+    try { fs.unlinkSync(videoPath); } catch {}
+    
+    // Return the formatted transcript
+    res.json({ 
+      transcript, 
+      subtitles: whisperData.segments
+    });
+
+  } catch (err) {
+    console.error('Transcription error:', err);
+    try { fs.unlinkSync(audioPath); } catch {}
+    try { fs.unlinkSync(videoPath); } catch {}
+    res.status(500).json({ error: `Transcription failed: ${err.message}` });
+  }
+});
+
 /** GET /job-status/:jobId — poll job progress */
 app.get('/job-status/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
@@ -431,6 +520,18 @@ app.post('/process', upload.single('video'), async (req, res) => {
     const srtPath    = path.join(UPLOADS, `${jobId}.srt`);
     fs.writeFileSync(srtPath, srtContent, 'utf-8');
 
+    const removeWatermark = req.body.removeWatermark === 'true' || req.body.removeWatermark === true;
+    let watermarkCoords = null;
+    if (req.body.watermarkCoords) {
+      try {
+        watermarkCoords = typeof req.body.watermarkCoords === 'string' 
+          ? JSON.parse(req.body.watermarkCoords) 
+          : req.body.watermarkCoords;
+      } catch (e) {
+        console.error('Failed to parse watermarkCoords:', e.message);
+      }
+    }
+
     const outFile = `output_${jobId}.mp4`;
     const outPath = path.join(OUTPUTS, outFile);
 
@@ -438,6 +539,8 @@ app.post('/process', upload.single('video'), async (req, res) => {
       fontSize:  parseInt(req.body.fontSize,  10) || 26,
       fontColor: req.body.fontColor  || '#FFFFFF',
       alignment: parseInt(req.body.alignment, 10) || 2,
+      removeWatermark,
+      watermarkCoords,
     });
 
     try { fs.unlinkSync(videoPath); } catch {}
